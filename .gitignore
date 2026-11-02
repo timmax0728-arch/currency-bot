@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# SQLite database and its WAL files
+storage/*
+!storage/.gitkeep
+
+# Build output
+/bin/
+*.exe
+
+# IDE
+.idea/
+.vscode/

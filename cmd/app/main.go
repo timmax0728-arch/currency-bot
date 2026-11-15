@@ -9,6 +9,7 @@ import (
 
 	"github.com/timmax0728-arch/currency-bot/internal/bot"
 	"github.com/timmax0728-arch/currency-bot/internal/config"
+	"github.com/timmax0728-arch/currency-bot/internal/rates"
 )
 
 func main() {
@@ -26,7 +27,9 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	b, err := bot.New(cfg.TelegramToken)
+	provider := rates.NewCBR(cfg.HTTPTimeout)
+
+	b, err := bot.New(cfg.TelegramToken, provider)
 	if err != nil {
 		return err
 	}

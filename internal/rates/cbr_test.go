@@ -6,6 +6,8 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,7 +23,7 @@ func newTestProvider(t *testing.T, handler http.HandlerFunc) *CBR {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	c := NewCBR(2 * time.Second)
+	c := NewCBR(2*time.Second, time.Minute)
 	c.url = srv.URL
 	return c
 }
@@ -100,7 +102,7 @@ func TestRate_APIErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := newTestProvider(t, tt.handler)
 
-			if _, err := p.Rate(context.Background(), "USD", "RUB"); err == nil{
+			if _, err := p.Rate(context.Background(), "USD", "RUB"); err == nil {
 				t.Fatal("unexpected error, got nil")
 			}
 		})
@@ -108,13 +110,98 @@ func TestRate_APIErrors(t *testing.T) {
 }
 
 func TestRate_Timeout(t *testing.T) {
-	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request){
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		_, _ = w.Write([]byte(testJSON))
 	})
 	p.client.Timeout = 50 * time.Millisecond
 
-	if _, err := p.Rate(context.Background(), "USD", "RUB"); err == nil{
+	if _, err := p.Rate(context.Background(), "USD", "RUB"); err == nil {
 		t.Fatal("expected timeout error, got nil")
+	}
+}
+
+// Сколько раз клиент ходил на сервер, считаем счётчиком в обработчике.
+
+func TestRate_Cache(t *testing.T) {
+	var calls atomic.Int32
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		okHandler(w, r)
+	})
+
+	// Подменяем часы, чтобы «перемотать» время без ожидания.
+	now := time.Now()
+	p.now = func() time.Time { return now }
+	p.ttl = time.Minute
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := p.Rate(ctx, "USD", "RUB"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("after 3 calls: server hit %d times, want 1", got)
+	}
+
+	// Другая пара валют берётся из того же кэша.
+	if _, err := p.Rate(ctx, "USD", "EUR"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("different pair: server hit %d times, want 1", got)
+	}
+
+	// Прошло больше TTL: кэш устарел, нужно скачать заново.
+	now = now.Add(2 * time.Minute)
+	if _, err := p.Rate(ctx, "USD", "RUB"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("after expiry: server hit %d times, want 2", got)
+	}
+}
+
+func TestRate_ErrorIsNotCached(t *testing.T) {
+	var calls atomic.Int32
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 { // первый раз сервер «ломается»
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		okHandler(w, r)
+	})
+	ctx := context.Background()
+
+	if _, err := p.Rate(ctx, "USD", "RUB"); err == nil {
+		t.Fatal("expected error on first call")
+	}
+	if _, err := p.Rate(ctx, "USD", "RUB"); err != nil {
+		t.Fatalf("second call should succeed, got: %v", err)
+	}
+}
+
+func TestRate_ConcurrentCalls(t *testing.T) {
+	var calls atomic.Int32
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		okHandler(w, r)
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.Rate(context.Background(), "USD", "RUB"); err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("20 parallel calls: server hit %d times, want 1", got)
 	}
 }

@@ -26,6 +26,7 @@ const (
 	amountText          = "Сумма должна быть положительным числом, например: 100 или 2.5."
 	unknownCurrencyText = "Не знаю такой валюты. Используйте трёхбуквенные коды, например USD, EUR, CNY, RUB."
 	failureText         = "Не удалось получить курсы валют. Попробуйте позже."
+	rateUsageText = "Напишите пару валют : /rate usd eur"
 )
 
 type Bot struct {
@@ -100,6 +101,9 @@ func (b *Bot) convert(ctx context.Context, input string) string {
 }
 
 func (b *Bot) rate(ctx context.Context, input string) string {
+	if strings.TrimSpace(input) == "" {
+		return rateUsageText
+	}
 	return b.convert(ctx, "1 "+input)
 }
 

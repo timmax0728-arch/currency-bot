@@ -27,7 +27,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	provider := rates.NewCBR(cfg.HTTPTimeout)
+	provider := rates.NewCBR(cfg.HTTPTimeout, cfg.CacheTTL)
 
 	b, err := bot.New(cfg.TelegramToken, provider)
 	if err != nil {

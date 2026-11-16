@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,12 +17,20 @@ const cbrURL = "https://www.cbr-xml-daily.ru/daily_json.js"
 type CBR struct {
 	client *http.Client
 	url string
+	ttl time.Duration
+	now func() time.Time
+
+	mu sync.RWMutex
+	cached map[string]valute
+	fetchedAt time.Time
 }
 
-func NewCBR(timeout time.Duration) *CBR{
+func NewCBR(timeout, ttl time.Duration) *CBR{
 	return &CBR{
 		client : &http.Client{Timeout: timeout},
 		url : 	 cbrURL,
+		ttl: ttl,
+		now : time.Now,
 	}
 }
 
@@ -38,17 +48,17 @@ func (c *CBR) Rate(ctx context.Context, from, to string)(float64, error) {
 	from = strings.ToUpper(strings.TrimSpace(from))
 	to = strings.ToUpper(strings.TrimSpace(to))
 	
-	data, err := c.fetch(ctx)
+	table, err := c.table(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	fromRub, err := rubPerUint(data.Valute, from)
+	fromRub, err := rubPerUnit(table, from)
 	if err != nil{
 		return 0, err
 	}
 
-	toRub, err := rubPerUint(data.Valute, to)
+	toRub, err := rubPerUnit(table, to)
 	if err != nil{
 		return 0, err
 	}
@@ -56,9 +66,39 @@ func (c *CBR) Rate(ctx context.Context, from, to string)(float64, error) {
 	return fromRub / toRub, nil
 }
 
+func (c *CBR) table(ctx context.Context) (map[string]valute, error) {
+	c.mu.RLock()
+	if c.fresh() {
+		t := c.cached
+		c.mu.RUnlock()
+		return t, nil
+	}
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.fresh() {
+		return c.cached, nil
+	}
+
+	log.Printf("rates: refreshing from %s", c.url)
+	data, err := c.fetch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.cached = data.Valute
+	c.fetchedAt = c.now()
+	return c.cached, nil
+}
+
+func(c *CBR) fresh() bool {
+	return c.cached != nil && c.now().Sub(c.fetchedAt) < c.ttl
+}
+
 func (c *CBR) fetch(ctx context.Context) (*dailyResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
-	if err != nil{
+	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("User-Agent", "currency-bot/1.0")
@@ -85,7 +125,7 @@ func (c *CBR) fetch(ctx context.Context) (*dailyResponse, error) {
 	return &data, nil
 }
 
-func rubPerUint(rates map[string]valute, code string) (float64, error) {
+func rubPerUnit(rates map[string]valute, code string) (float64, error) {
 	if code == "RUB" {
 		return 1, nil
 	}
